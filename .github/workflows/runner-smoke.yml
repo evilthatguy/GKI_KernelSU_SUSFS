@@ -1,0 +1,62 @@
+name: NP03J Runner Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Verify np03j-docker self-hosted runner
+    runs-on: [self-hosted, linux, x64, np03j-docker]
+    timeout-minutes: 10
+    steps:
+      - name: Verify runner identity and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== RUNNER IDENTITY ==="
+          echo "RUNNER_NAME=$RUNNER_NAME"
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=$RUNNER_ARCH"
+          echo "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT"
+
+          test "$RUNNER_NAME" = "np03j-docker"
+          test "$RUNNER_OS" = "Linux"
+          test "$RUNNER_ARCH" = "X64"
+          test "$RUNNER_ENVIRONMENT" = "self-hosted"
+
+          echo
+          echo "=== CPU / RAM ==="
+          echo "CPU=$(nproc)"
+          free -h
+          test "$(nproc)" -ge 16
+
+          echo
+          echo "=== DISK ==="
+          df -hT /
+          df -hT "$RUNNER_WORKSPACE" 2>/dev/null || true
+
+          avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          min_kb=$((20 * 1024 * 1024))
+          if [ "$avail_kb" -lt "$min_kb" ]; then
+            echo "ERROR: less than 20 GiB free on runner filesystem." >&2
+            exit 1
+          fi
+
+          echo
+          echo "=== SUDO ==="
+          sudo -n true
+          echo "SUDO=PASS"
+
+          echo
+          echo "=== NETWORK ==="
+          curl -fsSIL --max-time 15 https://github.com >/dev/null
+          curl -fsS --max-time 15 https://api.github.com/rate_limit >/dev/null
+          echo "NETWORK=PASS"
+
+          echo
+          echo "=== RESULT ==="
+          echo "NP03J_SELF_HOSTED_RUNNER=PASS"
