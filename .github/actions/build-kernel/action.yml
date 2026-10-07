@@ -7,12 +7,14 @@ inputs:
   page_size:
     description: 'ARM64 page size: 4k (default, unchanged behaviour) or 16k'
     required: false
-    type: string
     default: '4k'
+  use_cache:
+    description: 'Enable persistent disk/ccache reuse; false avoids a separate disk cache'
+    required: false
+    default: 'false'
   allow_version_mismatch:
     description: 'Whether to force-load version-mismatched modules'
     required: false
-    type: boolean
     default: false
 runs:
   using: composite
@@ -55,6 +57,10 @@ runs:
       working-directory: ${{ github.workspace }}/kernel
       run: |
         PAGE_SIZE="${{ inputs.page_size }}"
+        USE_CACHE="${{ inputs.use_cache }}"
+        if [ "$USE_CACHE" != "true" ]; then
+          export CCACHE_DISABLE=1
+        fi
         sed -i 's/check_defconfig//' ./common/build.config.gki
         if [ -f "build/build.sh" ]; then
           if [ "$PAGE_SIZE" != "4k" ]; then
@@ -81,10 +87,15 @@ runs:
           if [ "$PAGE_SIZE" = "16k" ]; then
             PAGE_SIZE_FLAGS+=(--page_size=16k)
           fi
+          CACHE_FLAGS=(--disk_cache=)
+          if [ "$USE_CACHE" = "true" ]; then
+            CACHE_FLAGS=(--disk_cache=/home/runner/.cache/bazel)
+          fi
+          # Keep Kleaf/Bazel's automatic CPU/RAM discovery; impose no resource cap.
           tools/bazel build \
             --config=fast \
             "${PAGE_SIZE_FLAGS[@]}" \
-            --disk_cache=/home/runner/.cache/bazel \
+            "${CACHE_FLAGS[@]}" \
             //common:kernel_aarch64/Image
         fi
 

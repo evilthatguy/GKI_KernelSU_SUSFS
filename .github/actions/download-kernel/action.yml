@@ -32,6 +32,7 @@ runs:
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
+        JOBS="$(nproc)"
 
         # Derive android and kernel from combined version when available
         VERSION="${{ inputs.version }}"
@@ -103,7 +104,7 @@ runs:
             # Tag revisions are not fetched when --no-tags is set.
             SYNC_TAG_FLAGS="--no-tags"
             if [ -n "$TAG_FALLBACK" ]; then SYNC_TAG_FLAGS=""; fi
-            if timeout $SYNC_TIMEOUT repo sync -c --current-branch --no-clone-bundle $SYNC_TAG_FLAGS --jobs-checkout=4 -j4; then
+            if timeout $SYNC_TIMEOUT repo sync -c --current-branch --no-clone-bundle $SYNC_TAG_FLAGS --jobs-checkout="$JOBS" -j"$JOBS"; then
               echo "Kernel repository initialization and sync succeeded on attempt $attempt."
               break
             else
@@ -193,3 +194,4 @@ runs:
         echo "Kernel common commit date: $COMMIT_DATE"
         echo "Kernel common commit msg: $COMMIT_MSG"
         echo "Kernel common commit SHA: $COMMIT_SHA"
+

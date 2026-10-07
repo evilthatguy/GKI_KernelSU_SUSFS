@@ -62,7 +62,7 @@ on:
       brand_name:
         required: false
         type: string
-        default: Wild
+        default: ""
       keep_kmi:
         required: false
         type: boolean
@@ -75,7 +75,7 @@ on:
         description: "Enable ccache/bazel cache (restore/save via release buckets)"
         required: false
         type: boolean
-        default: true
+        default: false
       page_size:
         description: "ARM64 page size: 4k (default) or 16k (Kleaf --page_size)"
         required: false
@@ -85,7 +85,7 @@ on:
 jobs:
   build-gki:
     name: "${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} (${{ inputs.variant }})"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, np03j-docker]
     timeout-minutes: 120
     concurrency:
       # Must include every input that varies across matrix legs. Without
@@ -95,6 +95,25 @@ jobs:
       group: build-${{ inputs.root_flavor }}-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}${{ inputs.page_size }}
       cancel-in-progress: false
     steps:
+    - name: NP03J runner preflight
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$RUNNER_ENVIRONMENT" = "self-hosted"
+        test "$RUNNER_NAME" = "np03j-docker"
+        test "$RUNNER_OS" = "Linux"
+        test "$RUNNER_ARCH" = "X64"
+        JOBS="$(nproc)"
+        test "$JOBS" -ge 16
+        free_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')"
+        if [ "$free_kib" -lt "$((20 * 1024 * 1024))" ]; then
+          echo "ERROR: less than 20 GiB free on the build filesystem." >&2
+          exit 1
+        fi
+        sudo -n true
+        echo "NP03J_PREFLIGHT=PASS CPU=$JOBS FREE_KiB=$free_kib"
+        free -h
+
     - name: Checkout Repository
       uses: actions/checkout@v7
 
@@ -124,7 +143,7 @@ jobs:
       uses: ./.github/actions/disk-cleanup
 
     - name: Free Disk Space
-      if: true
+      if: runner.environment == 'github-hosted'
       uses: endersonmenezes/free-disk-space@v4  # Use @main for latest, @v3 for stable
       with:
         remove_android: true
@@ -140,6 +159,7 @@ jobs:
         testing: false
 
     - name: Setup more Swap (for LTO)
+      if: runner.environment == 'github-hosted'
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 16
@@ -360,6 +380,9 @@ jobs:
       with:
         version: ${{ inputs.version }}
         kernel_version: ${{ inputs.kernel_version }}
+        android_version: ${{ inputs.android_version }}
+        os_patch_level: ${{ inputs.os_patch_level }}
+        sublevel: ${{ steps.extract.outputs.sublevel }}
         droidspaces_commit: ${{ inputs.droidspaces_commit }}
 
     - name: Apply NTSync Patches
@@ -390,6 +413,12 @@ jobs:
 
     - name: Setup Misc Configs
       uses: ./.github/actions/misc
+      with:
+        version: ${{ inputs.version }}
+        kernel_version: ${{ inputs.kernel_version }}
+        android_version: ${{ inputs.android_version }}
+        sublevel: ${{ steps.extract.outputs.sublevel }}
+        variant: ${{ inputs.variant }}
 
     - name: Enable BPF Stack (BTF + eBPF + FUSE-BPF)
       if: contains(inputs.feature_set, 'BPF')
@@ -551,6 +580,7 @@ jobs:
       with:
         version: ${{ inputs.version }}
         page_size: ${{ inputs.page_size }}
+        use_cache: ${{ inputs.use_cache }}
 
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
@@ -801,7 +831,7 @@ jobs:
           --arg root_version "${ROOT_VERSION:-${KSU_GIT_TAG:-N/A}}" \
           --arg root_commit "${ROOT_COMMIT:-${KSU_COMMIT:-N/A}}" \
           --arg susfs_commit "${SUSFS_COMMIT:-N/A}" \
-          --arg nomount_commit "${NOMOUNT_COMMIT:-N/A}" \
+          --arg nomount_commit "$NOMOUNT_MODULE_COMMIT" \
           --arg android_branch "${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}" \
           --arg kmi "${{ inputs.android_version }}-${{ inputs.kernel_version }}" \
           --arg page_size "${{ inputs.page_size }}" \

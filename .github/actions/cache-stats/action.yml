@@ -4,7 +4,6 @@ inputs:
   clear_stats:
     description: 'Whether to clear ccache stats after displaying (default: true)'
     required: true
-    type: boolean
     default: true
 
 runs:
@@ -17,3 +16,4 @@ runs:
 
     - name: Show Cache Folder Stats
       uses: ./.github/actions/cache-folder-stats
+

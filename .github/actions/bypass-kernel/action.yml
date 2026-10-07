@@ -7,7 +7,6 @@ inputs:
   allow_version_mismatch:
     description: 'Whether to force-load version-mismatched modules'
     required: false
-    type: boolean
     default: false
   version:
     description: 'Kernel config version (e.g., android14-6.1)'
@@ -38,3 +37,4 @@ runs:
           exit 1
         fi
         echo "Bypass hack applied to $TARGET_FILE"
+
