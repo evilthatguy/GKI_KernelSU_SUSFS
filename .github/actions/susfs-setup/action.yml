@@ -1,10 +1,9 @@
 name: 'Setup SUSFS Branch'
-description: 'Clone SUSFS repo and cherry-pick commits'
+description: 'Fetch exact SUSFS sources with a SHA-verified mirror and apply compatibility commits'
 inputs:
   susfs_commit:
-    description: 'SUSFS commit hash (empty = latest on auto-derived gki-{version} branch)'
-    required: false
-    default: ""
+    description: 'Resolved full SUSFS commit SHA to fetch and verify'
+    required: true
   version:
     description: 'Kernel config version (e.g., android15-6.6)'
     required: true
@@ -21,40 +20,83 @@ runs:
       run: |
         set -euo pipefail
 
-        # Retry transient network errors (up to 5 attempts, 5s backoff).
-        retry() {
-          local n=0
-          until [ "$n" -ge 5 ]; do
-            "$@" && return 0
-            n=$((n+1))
-            echo "retry $n/5 failed for: $*" >&2
-            sleep 5
+        retry_fetch() {
+          local attempt
+          for attempt in 1 2 3; do
+            if GIT_TERMINAL_PROMPT=0 timeout 120s "$@"; then return 0; fi
+            echo "SUSFS fetch failed (${attempt}/3): $*" >&2
+            if [ "$attempt" -lt 3 ]; then sleep 5; fi
           done
           return 1
         }
 
         SUSFS_BRANCH="gki-${{ inputs.version }}"
-        SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
-
-        echo "Preparing SUSFS for branch: $SUSFS_BRANCH"
-        echo "Cloning latest from $SUSFS_BRANCH..."
-        retry git clone "$SUSFS_REPO" -b "$SUSFS_BRANCH" susfs4ksu
-
-        if [ -n "${{ inputs.susfs_commit }}" ]; then
-          echo "Checking out SUSFS commit: ${{ inputs.susfs_commit }}"
-          retry git -C "${{ github.workspace }}/susfs4ksu" checkout "${{ inputs.susfs_commit }}"
+        EXPECTED_COMMIT="${{ inputs.susfs_commit }}"
+        PRIMARY_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+        MIRROR_REPO="https://github.com/ShirkNeko/susfs4ksu.git"
+        DEST="${{ github.workspace }}/susfs4ksu"
+        if ! [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "ERROR: SUSFS setup requires a resolved full commit SHA." >&2
+          exit 1
         fi
+        if [ -e "$DEST" ]; then
+          echo "ERROR: refusing to reuse an existing SUSFS checkout." >&2
+          exit 1
+        fi
+        git init "$DEST"
 
-        cd "${{ github.workspace }}/susfs4ksu"
+        SOURCE_REPO="${SUSFS_SOURCE_REPO:-$PRIMARY_REPO}"
+        if [ "$SOURCE_REPO" != "$PRIMARY_REPO" ] && [ "$SOURCE_REPO" != "$MIRROR_REPO" ]; then
+          echo "ERROR: unexpected SUSFS source URL." >&2
+          exit 1
+        fi
+        echo "Fetching $SUSFS_BRANCH at exact commit $EXPECTED_COMMIT from $SOURCE_REPO"
+        if ! retry_fetch git -C "$DEST" fetch --no-tags --depth=1 "$SOURCE_REPO" "$EXPECTED_COMMIT"; then
+          if [ "$SOURCE_REPO" = "$MIRROR_REPO" ]; then exit 1; fi
+          SOURCE_REPO="$MIRROR_REPO"
+          retry_fetch git -C "$DEST" fetch --no-tags --depth=1 "$SOURCE_REPO" "$EXPECTED_COMMIT"
+        fi
+        git -C "$DEST" checkout --detach "$EXPECTED_COMMIT"
+
+        cd "$DEST"
         SUSFS_COMMIT="$(git rev-parse HEAD)"
+        if [ "$SUSFS_COMMIT" != "$EXPECTED_COMMIT" ]; then
+          echo "ERROR: SUSFS checkout SHA mismatch." >&2
+          exit 1
+        fi
         echo "SUSFS_COMMIT=$SUSFS_COMMIT" >> "$GITHUB_ENV"
-        echo "Using SUSFS commit: $SUSFS_COMMIT"
+        echo "SUSFS_SOURCE_REPO=$SOURCE_REPO" >> "$GITHUB_ENV"
+        echo "Using verified SUSFS commit: $SUSFS_COMMIT"
 
         # Pershoot's latest two gki-android14-6.1-dev commits (currently the
         # no-features core build + Toolkit coexistence fixes) only apply to
         # KernelSU-Next (dev-susfs fork). Other flavors use the simonpunk
         # checkout as-is.
         if [ "${{ inputs.root_flavor }}" = "next" ]; then
-          git fetch https://gitlab.com/pershoot/susfs4ksu.git gki-android14-6.1-dev || true
-          git log ..FETCH_HEAD --oneline -n 2 | awk '{print $1}' | tac | xargs git cherry-pick 2>/dev/null || true
+          if [ "${{ inputs.version }}" = "android14-6.1" ] && [ "$SUSFS_COMMIT" = "24743360ea08d98f6ad72b856851abed8de5854f" ]; then
+            # Exact copies of Pershoot's current two compatibility commits:
+            # https://gitlab.com/pershoot/susfs4ksu/-/commit/88df19e864e90f738610b455706931476641b8d9
+            # https://gitlab.com/pershoot/susfs4ksu/-/commit/6d4f9a92ac7946d9d2d1904149d764506c9ae7b9
+            # Bundle them so a GitLab outage cannot silently omit either fix.
+            PATCH_DIR="${{ github.workspace }}/.github/patches/susfs-next"
+            (
+              cd "$PATCH_DIR"
+              printf '%s\n' \
+                'a5528354595912dea5ae5bb670cd351f9e3fc6f2f9c38b467ffa23dfa7f9d521  88df19e864e90f738610b455706931476641b8d9.patch' \
+                '188b98b4fe3f15b22c32922c2af96c29102c407f8c854bfa08d1f174e4c43b62  6d4f9a92ac7946d9d2d1904149d764506c9ae7b9.patch' \
+                | sha256sum --check --status
+            )
+            git am "$PATCH_DIR/88df19e864e90f738610b455706931476641b8d9.patch" \
+              "$PATCH_DIR/6d4f9a92ac7946d9d2d1904149d764506c9ae7b9.patch"
+            echo "SUSFS_PATCH_COMMITS=88df19e864e90f738610b455706931476641b8d9,6d4f9a92ac7946d9d2d1904149d764506c9ae7b9" >> "$GITHUB_ENV"
+          else
+            retry_fetch git fetch https://gitlab.com/pershoot/susfs4ksu.git gki-android14-6.1-dev
+            mapfile -t PATCH_COMMITS < <(git log ..FETCH_HEAD --format=%H -n 2 | tac)
+            if [ "${#PATCH_COMMITS[@]}" -ne 2 ]; then
+              echo "ERROR: expected two Pershoot compatibility commits." >&2
+              exit 1
+            fi
+            git cherry-pick "${PATCH_COMMITS[@]}"
+            echo "SUSFS_PATCH_COMMITS=$(IFS=,; echo "${PATCH_COMMITS[*]}")" >> "$GITHUB_ENV"
+          fi
         fi
